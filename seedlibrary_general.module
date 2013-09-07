@@ -1,0 +1,771 @@
+<?php
+/**
+ * @file
+ * Code for the seedlibrary_general feature.
+ */
+
+include_once 'seedlibrary_general.features.inc';
+
+/*********************************************************************
+ * Hooks.
+ ********************************************************************/
+
+/**
+ * Implements hook_menu().
+ */
+function seedlibrary_general_menu() {
+  $items['checkout/completed'] = array(
+    'title' => 'To complete your checkout of',
+    'title callback' => 'seedlibrary_general_checkout_title',
+    'type' => MENU_NORMAL_ITEM,
+    'page callback' => 'seedlibrary_general_checkout_completed',
+    'access arguments' => array('check out seeds'),
+  );
+
+  $items['checkin/completed'] = array(
+    'title' => 'To complete your checkin of',
+    'title callback' => 'seedlibrary_general_checkin_title',
+    'type' => MENU_NORMAL_ITEM,
+    'page callback' => 'seedlibrary_general_checkin_completed',
+    'access arguments' => array('check in seeds'),
+  );
+
+  $items['checkout/autocomplete'] = array(
+    'title' => 'Autocomplete for seeds',
+    'page callback' => '_seeds_autocomplete',
+    'access arguments' => array('check out seeds'),
+    'type' => MENU_CALLBACK,
+  );
+
+  $items['plant/%/checkout'] = array(
+    'title' => 'Checkout seeds',
+    'type' => MENU_NORMAL_ITEM,
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('seedlibrary_general_checkout', 1),
+    'access arguments' => array('check out seeds'),
+  );
+
+  $items['plant/%/checkin'] = array(
+    'title' => 'Checkin seeds',
+    'type' => MENU_NORMAL_ITEM,
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('seedlibrary_general_checkin', 1),
+    'access arguments' => array('check in seeds'),
+  );
+
+  $items['admin/content/copy'] = array(
+    'title' => 'Copy',
+    'description' => 'Manage user-facing copy',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('variable_module_form', 'seedlibrary_general'),
+    'access arguments' => array('administer users'),
+    'type' => MENU_LOCAL_TASK,
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_feeds_plugins().
+ *
+ * Implements a custom FeedsParser that processes Quickbooks CSV exports.
+ * Implements a custom FeedsParser that processes Mechanics Bank CSV exports.
+ *
+ */
+function seedlibrary_general_feeds_plugins() {
+  $info['USDA'] = array(
+    'name' => 'USDA Parser',
+    'description' => 'Parses USDA Plant data.',
+    'handler' => array(
+      'parent' => 'FeedsCSVParser',
+      'class' => 'USDAParser',
+      'file' => 'USDAParser.inc',
+      'path' => drupal_get_path('module', 'seedlibrary_general'),
+    ),
+  );
+  return $info;
+}
+
+/**
+ * Implements hook_enable().
+ *
+ * Enables USDA feed parser.
+ *
+ */
+function seedlibrary_general_enable() {
+  cache_clear_all('plugins:feeds:plugins', 'cache');
+}
+
+/**
+ * Implements hook_permission().
+ */
+function seedlibrary_general_permission() {
+  $permissions['check out seeds'] = array(
+    'title' => t('Check seeds out of the library'),
+    'description' => t('Allow users to check seeds out of the library'),
+  );
+  $permissions['check in seeds'] = array(
+    'title' => t('Check seeds into the library'),
+    'description' => t('Allow users to check seeds into the library'),
+  );
+  return $permissions;
+}
+
+/**
+ * Implements hook_node_presave().
+ */
+function seedlibrary_general_node_presave($node) {
+  $lang = $node->language;
+  if ($node->type == 'transaction') {
+    if ($node->field_transaction_quantity[$lang][0]['value'] > 0) {
+      $seed = node_load($node->field_transaction_seed[$lang][0]['nid']);
+      if (!empty($seed)) {
+        // Whenever a check out transaction is created, the corresponding seed
+        // quantity should be reduced.
+        if ($node->field_transaction_type[$lang][0]['value'] == 'out') {
+          $seed->field_seed_quantity[$seed->language][0]['value'] = $seed->field_seed_quantity[$seed->language][0]['value'] - $node->field_transaction_quantity[$lang][0]['value'];
+        }
+        node_save($seed);
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_views_data().
+ *
+ * Indicates custom field handlers for views.
+ */
+function seedlibrary_general_views_data_alter(&$data) {
+  $data['views_entity_node']['checkout_seeds'] = array(
+    'field' => array(
+      'title' => t('Checkout link'),
+      'help' => t('Provide a simple link to checkout seeds.'),
+      'handler' => 'views_handler_field_node_link_checkout',
+    ),
+  );
+  $data['views_entity_node']['checkin_seeds'] = array(
+    'field' => array(
+      'title' => t('Checkin link'),
+      'help' => t('Provide a simple link to checkin seeds.'),
+      'handler' => 'views_handler_field_node_link_checkin',
+    ),
+  );
+}
+
+/**
+ * Implements hook_token_info_alter().
+ */
+function seedlibrary_general_token_info_alter(&$data) {
+  $data['tokens']['node']['field_seed_id'] = array(
+   'name' => t("Seed ID"),
+   'description' => t("The unique seed ID for the seed node."),
+ );
+}
+
+/**
+ * Implements hook_tokens().
+ */
+function seedlibrary_general_tokens($type, $tokens, array $data = array(), array $options = array()) {
+  $replacements = array();
+
+  if ($type == 'node' && !empty($data) && !empty($data['node'])) {
+    foreach ($tokens as $name => $original) {
+      switch ($name) {
+        case 'field_seed_id':
+          $replacements[$original] = seedlibrary_general_seed_id($data['node']->title, $data['node']->nid);
+          break;
+      }
+    }
+  }
+  return $replacements;
+}
+
+/**
+ * Implements hook_variable_info().
+ */
+function seedlibrary_general_variable_info($options) {
+  $variable['seedlibrary_general_checkout_complete'] = array(
+    'title' => t('Checkout complete text'),
+    'description' => t('Appears after a user completes a checkout.'),
+    'type' => 'text_format',
+    'format' => 'filtered_html',
+    'token' => TRUE,
+    'access' => 'administer users',
+  );
+
+  $variable['seedlibrary_general_checkin_complete'] = array(
+    'title' => t('Check in complete text'),
+    'description' => t('Appears after a user completes a check in.'),
+    'type' => 'text_format',
+    'format' => 'filtered_html',
+    'token' => TRUE,
+    'access' => 'administer users',
+  );
+
+  return $variable;
+}
+
+/**
+ * Implements hook_block_info().
+ */
+function seedlibrary_general_block_info() {
+  $blocks['login-logout'] = array(
+    'info' => t('Login'),
+  );
+  return $blocks;
+}
+
+/**
+ * Implements hook_block_view().
+ */
+function seedlibrary_general_block_view($delta = '') {
+  $block = array();
+  switch ($delta) {
+    case 'login-logout':
+      global $user;
+      
+      if ($user->uid == 0) {
+        $block['content'] = l(t('Login'), 'user');
+      }
+      else {
+        $block['content'] = l(t('Logout'), 'user/logout');        
+      }
+      break;
+  }
+  return $block;
+}
+
+
+/*********************************************************************
+ * Check out seeds.
+ ********************************************************************/
+function seedlibrary_general_checkout($form, &$form_state, $seed_id) {
+  $form['#attributes']['class'][] = 'checkin-checkout-form';
+
+  $form['quantity'] = array(
+    '#type' => 'textfield',
+    '#title' => 'Number of seeds to checkout',
+    '#default_value' => 5,
+    '#prefix' => t('<span class="inline-text">I am checking out '),
+    '#required' => TRUE,
+    '#attributes' => array(
+      'class' => array(
+        'small-input'
+      ),
+    ),
+  );
+
+  $form['seed'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Seed name'),
+    '#suffix' => t('<span class="inline-text">seeds.</span>'),
+    '#default_value' => seedlibrary_general_set_autocomplete($seed_id),
+    '#autocomplete_path' => 'checkout/autocomplete',
+    '#required' => TRUE,
+    '#attributes' => array(
+      'class' => array(
+        'large-input'
+      ),
+    ),
+  );
+
+  $form['actions'] = array(
+    '#type' => 'actions',
+  );
+
+  $form['actions']['submit'] = array(
+     '#type' => 'submit',
+     '#value' => t('Checkout'),
+  );
+
+  return $form;
+}
+
+function seedlibrary_general_checkout_validate($form, &$form_state) {
+  // Validate quantity.
+  if (!is_numeric($form_state['values']['quantity'])) {
+    form_set_error('quantity', t('Number of seeds to checkout must be a number.'));
+  }
+  else if ($form_state['values']['quantity'] <= 0) {
+    form_set_error('quantity', t('You must check out more than 0 seeds.'));
+  }
+
+  // Validate seed type.
+  if (!empty($form_state['values']['seed'])) {
+    $nid = seedlibrary_general_get_seed_nid($form_state['values']['seed']);
+    $seed = node_load($nid);
+    if (empty($seed)) {
+      form_set_error('seed', t("The plant you specified is not in the library."));
+    }
+
+    else if ($seed->field_seed_quantity[$seed->language][0]['value'] <= 0) {
+      form_set_error('seed', t("There are no more seeds available for checkout for that plant."));
+    }
+
+    // You can't check out more seeds than are currently in the library.
+    if (!empty($form_state['values']['quantity']) && $seed->field_seed_quantity[$seed->language][0]['value'] < $form_state['values']['quantity']) {
+      form_set_error('quantity', t("There are only @quantity seeds available for checkout.", array('@quantity' => $seed->field_seed_quantity[$seed->language][0]['value'])));
+    }
+  }
+}
+
+function seedlibrary_general_checkout_submit($form, &$form_state) {
+  $node = new stdClass();
+  $node->type = 'transaction';
+  node_object_prepare($node);
+
+  $nid = seedlibrary_general_get_seed_nid($form_state['values']['seed']);
+  $seed = node_load($nid);
+
+  global $user;
+  $node->title    = $user->name . ' checked out ' . $form_state['values']['quantity'] . ' ' . $seed->title . ' seeds on ' .  date('M, d, Y');
+  $node->language = LANGUAGE_NONE;
+
+
+  $node->field_transaction_user[$node->language][0]['uid'] = $user->uid;
+  $node->field_transaction_seed[$node->language][0]['nid'] = $nid;
+  $node->field_transaction_type[$node->language][0]['value'] = 'out';
+  $node->field_transaction_quantity[$node->language][0]['value'] = $form_state['values']['quantity'];
+
+  node_save($node);
+
+  $form_state['redirect'] = array(
+    'checkout/completed',
+    array(
+      'query' => array(
+        'seed_id' => seedlibrary_general_seed_id($seed->title, $nid),
+      )
+    )
+  );
+}
+
+function _seeds_autocomplete($string) {
+  $matches = array();
+  $query = db_select('node', 'n');
+  $query->addField('n', 'title');
+  $query->addField('n', 'nid');
+  $query->leftJoin('field_data_field_seed_quantity', 's', 's.entity_id = n.nid');
+  $query->condition('n.type', 'seed');
+  $query->condition('n.status', 1);
+  $query->condition('s.field_seed_quantity_value', 0, '>');
+
+  foreach ($query->execute() as $row) {
+    $result = seedlibrary_general_seed_listing($row->title, seedlibrary_general_seed_id($row->title, $row->nid));
+    $matches[$result] = $result;
+  }
+
+  drupal_json_output($matches);
+}
+
+function seedlibrary_general_checkout_title() {
+  $seed_name = '';
+  $url = drupal_parse_url(request_uri());
+  if (!empty($url['query']) && array_key_exists('seed_id', $url['query'])) {
+    $nid = seedlibrary_general_get_seed_nid($url['query']['seed_id'], FALSE);
+    $seed = node_load($nid);
+    if (!empty($seed)) {
+      $seed_name = $seed->title;
+    }
+  }
+  return t('To complete your checkout of @seed', array('@seed' => $seed_name));
+}
+
+function seedlibrary_general_checkout_completed() {
+  $markup = variable_get_variable('seedlibrary_general_checkout_complete');
+  return check_markup($markup['value'], $markup['format']);
+}
+
+/*********************************************************************
+ * Check in seeds.
+ ********************************************************************/
+function seedlibrary_general_checkin($form, &$form_state, $seed_id) {
+  $form['#attributes']['class'][] = 'checkin-checkout-form';
+
+  $form['seed_id'] = array(
+    '#type' => 'hidden',
+    '#value' => $seed_id,
+  );
+
+  $seed_data = seedlibrary_general_get_seed_data($seed_id);
+  if (empty($seed_data['common name'])) {
+    $form['intro'] = array(
+      '#markup' => t("<p>Have you <a href=\"/full-library\">searched the full library</a> for the seed you are checking in? You should only create a new seed entry if you are sure the seed doesn't exist in the library at all.</p>"),
+      '#prefix' => '<div class="madlibs-book">',
+      '#suffix' => '</div>',
+    );
+  }
+
+  $form['list'] = array(
+    '#type' => 'markup',
+    '#prefix' => '<ol>',
+    '#suffix' => '</ol>',
+  );
+
+  $form['list']['amount-common-name'] = array(
+    '#type' => 'markup',
+    '#prefix' => '<li><span class="list-item">',
+    '#suffix' => '</span></li>',
+  );
+
+  $form['list']['amount-common-name']['quantity'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Number of seeds to checkin'),
+    '#default_value' => 5,
+    '#description' => t('Amount'),
+    '#required' => TRUE,
+    '#prefix' => t('<span class="inline-text">I am checking in </span>'),
+    '#attributes' => array(
+      'class' => array(
+        'small-input'
+      ),
+    ),
+  );
+
+  $form['list']['amount-common-name']['common-name'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Common name'),
+    '#description' => t('Common name'),
+    '#required' => TRUE,
+    '#suffix' => t('<span class="inline-text">seeds.</span>'),
+    '#default_value' => $seed_data['common name'],
+    '#attributes' => array(
+      'class' => array(
+        'medium-input'
+      ),
+    ),
+  );
+
+  $form['list']['scientific-name'] = array(
+    '#type' => 'markup',
+    '#prefix' => '<li><span class="list-item">',
+    '#suffix' => '</span></li>',
+  );
+
+  $form['list']['scientific-name']['family'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Family'),
+    '#description' => t('Family'),
+    '#required' => TRUE,
+    '#default_value' => $seed_data['family'],
+    '#prefix' => t('<span class="inline-text">Its scientific name is </span>'),
+    '#attributes' => array(
+      'class' => array(
+        'medium-input'
+      ),
+    ),
+  );
+
+  $form['list']['scientific-name']['genus'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Genus'),
+    '#description' => t('Genus'),
+    '#required' => TRUE,
+    '#default_value' => $seed_data['genus'],
+    '#attributes' => array(
+      'class' => array(
+        'medium-input',
+      ),
+    ),
+  );
+
+  $form['list']['scientific-name']['species'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Species'),
+    '#description' => t('Species'),
+    '#required' => TRUE,
+    '#default_value' => $seed_data['species'],
+    '#attributes' => array(
+      'class' => array(
+        'medium-input',
+      ),
+    ),
+  );
+
+  $form['list']['scientific-name']['variety'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Variety'),
+    '#description' => t('Variety'),
+    '#default_value' => $seed_data['variety'],
+    '#attributes' => array(
+      'class' => array(
+        'medium-input',
+      ),
+    ),
+  );
+
+  $form['list']['scientific-name']['cultivar'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Cultivar'),
+    '#description' => t('Cultivar'),
+    '#default_value' => $seed_data['cultivar'],
+    '#suffix' => t('<span class="inline-text">.</span>'),
+    '#attributes' => array(
+      'class' => array(
+        'medium-input',
+      ),
+    ),
+  );
+
+  $form['list']['difficulty-location'] = array(
+    '#type' => 'markup',
+    '#prefix' => '<li><span class="list-item">',
+    '#suffix' => '</span></li>',
+  );
+
+  $form['list']['difficulty-location']['difficulty'] = array(
+    '#type' => 'select',
+    '#title' => 'Difficulty rating',
+    '#description' => 'Difficulty rating',
+    '#options' => array(
+      'easy' => 'was easy to grow',
+      'intermediate' => 'required moderate skill',
+      'advanced' => 'is an advanced seed'
+    ),
+    '#prefix' => t('<span class="inline-text">It </span>'),
+    '#attributes' => array(
+      'class' => array(
+        'medium-input'
+      ),
+    ),
+  );
+
+  $form['list']['difficulty-location']['location'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Location'),
+    '#description' => t('Location'),
+    '#prefix' => t('<span class="inline-text">, and I grew it at </span>'),
+    '#suffix' => t('<span class="inline-text">.</span>'),
+    '#attributes' => array(
+      'class' => array(
+        'medium-input',
+      ),
+    ),
+  );
+
+  $form['list']['num-days'] = array(
+    '#type' => 'markup',
+    '#prefix' => '<li><span class="list-item">',
+    '#suffix' => '</span></li>',
+  );
+
+  $form['list']['num-days']['num-plants'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Number of parent plants'),
+    '#default_value' => 1,
+    '#description' => t('Number'),
+    '#prefix' => t('<span class="inline-text">These seeds came from </span>'),
+    '#suffix' => t('<span class="inline-text">parent plant(s)</span>'),
+    '#attributes' => array(
+      'class' => array(
+        'small-input'
+      ),
+    ),
+  );
+
+  $form['list']['num-days']['days-mature'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Days to maturity'),
+    '#default_value' => 10,
+    '#description' => t('Number'),
+    '#prefix' => t('<span class="inline-text">, and they take </span>'),
+    '#suffix' => t('<span class="inline-text">days to mature.</span>'),
+    '#attributes' => array(
+      'class' => array(
+        'small-input'
+      ),
+    ),
+  );
+
+  $form['list']['general-notes'] = array(
+    '#type' => 'markup',
+    '#prefix' => '<li><span class="list-item">',
+    '#suffix' => '</span></li>',
+  );
+
+  $form['list']['general-notes']['notes'] = array(
+    '#type' => 'textarea',
+    '#title' => t('Notes'),
+    '#prefix' => t('<span class="inline-text">You should know these additional things about these seeds:</span>'),
+  );
+
+  $form['actions'] = array(
+    '#type' => 'actions',
+  );
+
+  $form['actions']['submit'] = array(
+     '#type' => 'submit',
+     '#value' => t('Checkin'),
+  );
+
+  return $form;
+}
+
+function seedlibrary_general_checkin_validate($form, &$form_state) {
+  // Validate quantity.
+  if (!is_numeric($form_state['values']['quantity'])) {
+    form_set_error('quantity', t('Number of seeds to checkin must be a number.'));
+  }
+  else if ($form_state['values']['quantity'] <= 0) {
+    form_set_error('quantity', t('You must check in more than 0 seeds.'));
+  }
+
+  // Validate number of parent plants.
+  if (!is_numeric($form_state['values']['num-plants'])) {
+    form_set_error('num-plants', t('Number of parent plants must be a number.'));
+  }
+  else if ($form_state['values']['num-plants'] <= 0) {
+    form_set_error('num-plants', t('Your seeds must have at least 1 parent plant.'));
+  }
+
+  // Validate days to maturity.
+  if (!is_numeric($form_state['values']['days-mature'])) {
+    form_set_error('days-mature', t('Days to maturity must be a number.'));
+  }
+  else if ($form_state['values']['days-mature'] <= 0) {
+    form_set_error('days-mature', t('Days to maturity must be at least 1.'));
+  }
+}
+
+function seedlibrary_general_checkin_submit($form, &$form_state) {
+  // Create new seed node.
+  $seed = new stdClass();
+  $seed->type = 'seed';
+  node_object_prepare($seed);
+
+  global $user;
+  $seed->title    = $form_state['values']['common name'];
+  $seed->language = LANGUAGE_NONE;
+
+  $seed->field_seed_family[$seed->language][0]['value'] = $form_state['values']['family'];
+  $seed->field_seed_species[$seed->language][0]['value'] = $form_state['values']['species'];
+  $seed->field_seed_variety[$seed->language][0]['value'] = $form_state['values']['variety'];
+  $seed->field_seed_quantity[$seed->language][0]['value'] = $form_state['values']['quantity'];
+  $seed->field_seed_notes[$seed->language][0]['value'] = $form_state['values']['notes'];
+  $seed->field_seed_difficulty_rating[$seed->language][0]['value'] = $form_state['values']['difficulty'];
+
+  node_save($seed);
+
+  // Create child relationship on parent node.
+  if (!empty($form_state['values']['seed_id'])) {
+    $nid = seedlibrary_general_get_seed_nid($form_state['values']['seed_id'], FALSE);
+    $parent = node_load($nid);
+    if (!empty($parent)) {
+      $parent->field_seed_children[$parent->language][] = array(
+        'nid' => $seed->nid,
+      );
+      node_save($parent);
+    }
+  }
+
+  // Create checked in transaction node.
+  $transaction = new stdClass();
+  $transaction->type = 'transaction';
+  node_object_prepare($transaction);
+
+  global $user;
+  $transaction->title    = $user->name . ' checked in ' . $form_state['values']['quantity'] . ' ' . $form_state['values']['common name'] . ' seeds on ' .  date('M, d, Y');
+  $transaction->language = LANGUAGE_NONE;
+
+  $transaction->field_transaction_user[$transaction->language][0]['uid'] = $user->uid;
+  $transaction->field_transaction_seed[$transaction->language][0]['nid'] = $seed->nid;
+  $transaction->field_transaction_type[$transaction->language][0]['value'] = 'in';
+  $transaction->field_transaction_quantity[$transaction->language][0]['value'] = $form_state['values']['quantity'];
+  $transaction->field_transaction_number_plants[$transaction->language][0]['value'] = $form_state['values']['num-plants'];
+  $transaction->field_transaction_location[$transaction->language][0]['value'] = $form_state['values']['location'];
+  // Derive climate from location.
+  $transaction->field_transaction_days_to_mature[$transaction->language][0]['value'] = $form_state['values']['days-mature'];
+
+  node_save($transaction);
+
+  $form_state['redirect'] = array(
+    'checkin/completed',
+    array(
+      'query' => array(
+        'seed_id' => seedlibrary_general_seed_id($seed->title, $seed->nid),
+      )
+    )
+  );
+}
+
+function seedlibrary_general_checkin_title() {
+  $seed_name = '';
+  $url = drupal_parse_url(request_uri());
+  if (!empty($url['query']) && array_key_exists('seed_id', $url['query'])) {
+    $nid = seedlibrary_general_get_seed_nid($url['query']['seed_id'], FALSE);
+    $seed = node_load($nid);
+    if (!empty($seed)) {
+      $seed_name = $seed->title;
+    }
+  }
+  return t('To complete your checkin of @seed', array('@seed' => $seed_name));
+}
+
+function seedlibrary_general_checkin_completed() {
+ // $markup = variable_get_variable('seedlibrary_general_checkin_complete');
+ // return check_markup($markup['value'], $markup['format']);
+}
+
+
+
+/*********************************************************************
+ * Helper functions
+ ********************************************************************/
+function seedlibrary_general_seed_id($title, $nid) {
+  return strtoupper(substr($title, 0, 3)) . '-' . $nid;
+}
+
+function seedlibrary_general_get_seed_nid($seed_id, $parens = TRUE) {
+  $match = $parens ? "/\(\D{4}(\d*)\)/" : "/\D{4}(\d*)/";
+  preg_match($match, $seed_id, $nid);
+  return empty($nid) ? NULL : $nid[1];
+}
+
+function seedlibrary_general_set_autocomplete($seed_id) {
+  if (empty($seed_id)) {
+    return '';
+  }
+  else {
+    $nid = seedlibrary_general_get_seed_nid($seed_id, FALSE);
+    $seed = node_load($nid);
+    if (!empty($seed)) {
+      return seedlibrary_general_seed_listing($seed->title, $seed_id);
+    }
+  }
+}
+
+function seedlibrary_general_seed_listing($title, $seed_id) {
+  return check_plain($title) . ' (' . $seed_id . ')';
+}
+
+function seedlibrary_general_get_seed_data($seed_id) {
+  $data = array(
+    'common name' => '',
+    'family' => '',
+    'genus' => '',
+    'species' => '',
+    'variety' => '',
+    'cultivar' => '',
+  );
+  if (!empty($seed_id)) {
+    $nid = seedlibrary_general_get_seed_nid($seed_id, FALSE);
+    $seed = node_load($nid);
+    if (!empty($seed)) {
+      foreach ($data as $key => $value) {
+        if ($key == 'common name') {
+          $data[$key] = $seed->title;
+        }
+        else {
+          $field_name = 'field_seed_' . $key;
+          $field = $seed->$field_name;
+          if (!empty($field[$seed->language][0]['value'])) {
+            $data[$key] = $field[$seed->language][0]['value'];
+          }
+        }
+      }
+    }
+  }
+  return $data;
+}
+
+
